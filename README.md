@@ -1,0 +1,3 @@
+# AWS Beam Core
+
+TODO: ADD README
