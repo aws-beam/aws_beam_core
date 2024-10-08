@@ -1,0 +1,18 @@
+{application, aws_beam_core,
+ [ {description, "AWS BEAM Core"}
+ , {vsn, "git"}
+ , {registered, []}
+ , { applications
+   , [ kernel
+     , stdlib
+     , xmerl
+     , aws_signature
+     ]
+   }
+ , {env,[]}
+ , {modules, []}
+ , {pkg_name, "aws_beam_core"}
+ , {licenses, ["Apache-2.0"]}
+ , {build_tools, ["rebar3"]}
+ , {links, [{"GitHub", "https://github.com/aws-beam/aws_beam_core"}]}
+ ]}.
