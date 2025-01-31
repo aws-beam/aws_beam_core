@@ -32,20 +32,32 @@ Support for creating IAM Tokens (more info here) has been added as part of the a
 This allows for easy creation of RDS/Aurora tokens to be used for IAM based authentication instead of username/password combination.
 
 ```erlang
-> Client = aws_client:make_temporary_client(<<"AccessKeyID">>, <<"SecretAccessKey">>, <<"Token">>, <<"eu-west-1">>).
+> #{access_key_id := AccessKeyID,
+    secret_access_key := SecretAccessKey,
+    region := Region,
+    token := Token} =
+    aws_credentials:get_credentials(),
+  aws_client:make_temporary_client(AccessKeyID, SecretAccessKey, Token, Region).
+> Client = aws_client:make_temporary_client(AccessKeyID, SecretAccessKey, Token, Region).
 [...]
 > {ok, Url} = aws_rds_iam_token:rds_token_create(Client, <<"db_endpoint">>, 5432, <<"db_user">>).
 [...]
 ```
 
-This token can subsequently be used to connect to the database over IAM.
+This token can subsequently be used to connect to the database over IAM. 
 
 ##### AWS S3 Presigned Url
 Support for Presigning S3 urls has been added as part of the aws_s3_presigned_url module.
 This allows generating either a get or put presigned s3 url,
 which can be used by external clients such as cURL to access (get/put) the object in question.
 ```erlang
-> Client = aws_client:make_temporary_client(<<"AccessKeyID">>, <<"SecretAccessKey">>, <<"Token">>, <<"eu-west-1">>).
+> #{access_key_id := AccessKeyID,
+    secret_access_key := SecretAccessKey,
+    region := Region,
+    token := Token} =
+    aws_credentials:get_credentials(),
+  aws_client:make_temporary_client(AccessKeyID, SecretAccessKey, Token, Region).
+> Client = aws_client:make_temporary_client(AccessKeyID, SecretAccessKey, Token, Region).
 [...]
 > {ok, Url} = aws_s3_presigned_url:make_presigned_v4_url(Client, put, 3600, <<"bucket">>, <<"key">>)
 [...]
