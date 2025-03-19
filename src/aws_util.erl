@@ -57,7 +57,6 @@ encode_uri(Value) when is_binary(Value) ->
   << (uri_encode_path_byte(Byte)) || <<Byte>> <= Value >>.
 
 -spec uri_encode_path_byte(byte()) -> binary().
-uri_encode_path_byte($/) -> <<"/">>;
 uri_encode_path_byte(Byte)
     when $0 =< Byte, Byte =< $9;
         $a =< Byte, Byte =< $z;
@@ -280,6 +279,11 @@ decode_utf8_xml_text_test() ->
 encode_uri_test() ->
   Segment = <<"hello world!">>,
   ?assertEqual(<<"hello%20world%21">>, encode_uri(Segment)),
+  ?assertEqual(encode_uri(Segment), encode_uri(binary_to_list(Segment))).
+
+encode_forward_slash_test() ->
+  Segment = <<"hello/world!">>,
+  ?assertEqual(<<"hello%2Fworld%21">>, encode_uri(Segment)),
   ?assertEqual(encode_uri(Segment), encode_uri(binary_to_list(Segment))).
 
 encode_uri_parenthesis_test() ->
