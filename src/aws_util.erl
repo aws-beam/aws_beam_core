@@ -5,6 +5,7 @@
          add_headers/2,
          encode_query/1,
          encode_uri/1,
+         encode_uri/2,
          encode_multi_segment_uri/1,
          encode_xml/1,
          decode_xml/1
@@ -51,14 +52,22 @@ encode_multi_segment_uri(Value) ->
     binary_join(Encoded, <<"/">>).
 
 %% @doc Encode URI into a percent-encoding string.
+-spec encode_uri(binary()) -> binary().
 encode_uri(Value) when is_list(Value) ->
-  encode_uri(list_to_binary(Value));
+  encode_uri(list_to_binary(Value), skip_slash);
 encode_uri(Value) when is_binary(Value) ->
-  << (uri_encode_path_byte(Byte)) || <<Byte>> <= Value >>.
+  encode_uri(Value, skip_slash).
 
--spec uri_encode_path_byte(byte()) -> binary().
-uri_encode_path_byte($/) -> <<"/">>;
-uri_encode_path_byte(Byte)
+-spec encode_uri(binary(), skip_slash | full) -> binary().
+encode_uri(Value, Type) when is_list(Value) ->
+  encode_uri(list_to_binary(Value), Type);
+encode_uri(Value, Type) when is_binary(Value) ->
+  << (uri_encode_path_byte(Byte, Type)) || <<Byte>> <= Value >>.
+
+-spec uri_encode_path_byte(byte(), atom()) -> binary().
+uri_encode_path_byte($/, skip_slash) -> <<"/">>;
+uri_encode_path_byte($/, full) -> <<"%2F">>;
+uri_encode_path_byte(Byte, _Type)
     when $0 =< Byte, Byte =< $9;
         $a =< Byte, Byte =< $z;
         $A =< Byte, Byte =< $Z;
@@ -67,7 +76,7 @@ uri_encode_path_byte(Byte)
         Byte =:= $-;
         Byte =:= $. ->
     <<Byte>>;
-uri_encode_path_byte(Byte) ->
+uri_encode_path_byte(Byte, _Type) ->
     H = Byte band 16#F0 bsr 4,
     L = Byte band 16#0F,
     <<"%", (hex(H, upper)), (hex(L, upper))>>.
@@ -281,6 +290,11 @@ encode_uri_test() ->
   Segment = <<"hello world!">>,
   ?assertEqual(<<"hello%20world%21">>, encode_uri(Segment)),
   ?assertEqual(encode_uri(Segment), encode_uri(binary_to_list(Segment))).
+
+encode_forward_slash_test() ->
+  Segment = <<"hello/world!">>,
+  ?assertEqual(<<"hello%2Fworld%21">>, encode_uri(Segment, full)),
+  ?assertEqual(encode_uri(Segment, full), encode_uri(binary_to_list(Segment), full)).
 
 encode_uri_parenthesis_test() ->
   Segment = <<"hello world(!)">>,

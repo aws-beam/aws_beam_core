@@ -40,7 +40,7 @@ make_presigned_v4_url(Client0, Method, ExpireSeconds, Bucket, Key, Style) ->
                 undefined ->
                   Options0;
                 _ ->
-                  [{session_token, aws_util:encode_uri(SecurityToken)} | Options0]
+                  [{session_token, aws_util:encode_uri(SecurityToken, full)} | Options0]
               end,
     {ok, aws_signature:sign_v4_query_params(AccessKeyID, SecretAccessKey, Region, Service, Now, MethodBin, URL, Options)}.
 
