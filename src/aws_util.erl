@@ -89,7 +89,7 @@ uri_encode_path_byte(Byte, _Type) ->
 encode_query(QueryL) when is_list(QueryL) ->
   uri_string:compose_query(
     lists:sort(
-      lists:map(fun({K, true}) -> {K, ""};
+      lists:map(fun({K, V}) when is_boolean(V) -> {K, atom_to_binary(V)};
                     ({K, V}) when is_binary(V) -> {K, V};
                     ({K, V}) when is_float(V) -> {K, float_to_binary(V, [short])};
                     ({K, V}) when is_integer(V) -> {K, integer_to_binary(V)}
@@ -313,8 +313,9 @@ encode_multi_segment_uri_test() ->
 encode_query_test() ->
   ?assertEqual(<<"float=1.21&int=123&two=2">>,
                encode_query([{<<"two">>, <<"2">>}, {<<"float">>, 1.21}, {<<"int">>, 123}])),
-  ?assertEqual(<<"float=1.2&int=123&two=2">>,
-               encode_query([{<<"two">>, <<"2">>}, {<<"float">>, 1.20}, {<<"int">>, 123}])),
+  ?assertEqual(<<"boolean1=true&boolean2=false&float=1.2&int=123&two=2">>,
+               encode_query([{<<"two">>, <<"2">>}, {<<"float">>, 1.20}, {<<"int">>, 123},
+                            {<<"boolean1">>, true}, {<<"boolean2">>, false}])),
   Input1 = [{<<"two">>, <<"2">>}, {<<"float">>, 1.21}, {<<"int">>, 123}],
   ?assertEqual(encode_query(Input1), encode_query(maps:from_list(Input1))).
 
