@@ -183,12 +183,15 @@ os_env_bin(Name) when is_binary(Name) ->
 %% or the SigV4 canonical request.
 rewrite_with_override(Override, OpPath, DefaultUrl, DefaultHost) ->
     case uri_string:parse(to_binary(Override)) of
-        #{} = U0 ->
-            U1 = maps:without([query, fragment, userinfo], U0),
-            BasePath = to_binary(maps:get(path, U1, <<>>)),
-            U2 = U1#{path => join_path(BasePath, to_binary(OpPath))},
-            {to_binary(uri_string:recompose(U2)), authority_from_uri(U2)};
-        {error, _, _} ->
+        #{scheme := Scheme} = U0 ->
+            Authority = authority_from_uri(U0),
+            BasePath = to_binary(maps:get(path, U0, <<>>)),
+            Path = join_path(BasePath, to_binary(OpPath)),
+            Url = <<(to_binary(Scheme))/binary, "://",
+                    Authority/binary,
+                    Path/binary>>,
+            {Url, Authority};
+        _ ->
             {DefaultUrl, DefaultHost}
     end.
 
@@ -562,6 +565,29 @@ apply_endpoint_url_override_base_path_no_op_path_test() ->
                                        <<"default">>,
                                        <<"/">>,
                                        <<"AWS_ENDPOINT_URL_DYNAMODB">>))
+    end).
+
+apply_endpoint_url_override_preserves_query_in_op_path_test() ->
+    %% Generated REST clients pass paths like "/bucket?list-type=2" or
+    %% "/bucket/key?acl" — the `?' must NOT be percent-encoded.
+    with_env([{"AWS_ENDPOINT_URL_S3", "http://localhost:9000"},
+              {?ENV_GEN, false}], fun() ->
+        ?assertEqual(
+           {<<"http://localhost:9000/bucket?list-type=2">>,
+            <<"localhost:9000">>},
+           apply_endpoint_url_override(
+             <<"https://amazonaws.com:443/bucket?list-type=2">>,
+             <<"amazonaws.com">>,
+             <<"/bucket?list-type=2">>,
+             <<"AWS_ENDPOINT_URL_S3">>)),
+        ?assertEqual(
+           {<<"http://localhost:9000/bucket/key?acl">>,
+            <<"localhost:9000">>},
+           apply_endpoint_url_override(
+             <<"https://amazonaws.com:443/bucket/key?acl">>,
+             <<"amazonaws.com">>,
+             <<"/bucket/key?acl">>,
+             <<"AWS_ENDPOINT_URL_S3">>))
     end).
 
 apply_endpoint_url_override_replaces_scheme_test() ->
