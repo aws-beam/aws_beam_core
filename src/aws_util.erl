@@ -8,7 +8,8 @@
          encode_uri/2,
          encode_multi_segment_uri/1,
          encode_xml/1,
-         decode_xml/1
+         decode_xml/1,
+         apply_endpoint_url_override/4
         ]).
 
 -include_lib("xmerl/include/xmerl.hrl").
@@ -123,9 +124,110 @@ decode_xml(Xml) ->
     {Element, []} = xmerl_scan:string(XmlString, Opts),
     Element.
 
+%% @doc Apply the AWS-canonical endpoint-override env vars to a default URL.
+%%
+%% `ServiceEnvVar' is the service-specific env var name (e.g.
+%% `<<"AWS_ENDPOINT_URL_DYNAMODB">>'). It is consulted first; the generic
+%% `AWS_ENDPOINT_URL' is consulted as a fallback. Matches the precedence of
+%% the AWS CLI v2, boto3, JS v3, and Go v2 SDKs.
+%%
+%% When an override is set, the scheme + authority of the request URL are
+%% replaced with those of the override, the override's base path is joined
+%% with the operation path (`OpPath'), any query string or fragment in the
+%% override is dropped (matching Go v2's middleware behavior), and the
+%% returned `Host' is the override's authority (`host[:port]') so SigV4
+%% signs against the wire endpoint.
+%%
+%% When unset, the defaults are returned unchanged. An empty-string value
+%% (`""') is treated as unset.
+-spec apply_endpoint_url_override(binary(), binary(), binary(), binary()) ->
+    {binary(), binary()}.
+apply_endpoint_url_override(DefaultUrl, DefaultHost, OpPath, ServiceEnvVar)
+  when is_binary(ServiceEnvVar) ->
+    case endpoint_url_from_env(ServiceEnvVar) of
+        undefined ->
+            {DefaultUrl, DefaultHost};
+        Override ->
+            rewrite_with_override(Override, OpPath, DefaultUrl, DefaultHost)
+    end.
+
 %%====================================================================
 %% Internal functions
 %%====================================================================
+
+%% Resolve the endpoint-url env var with service-specific precedence over
+%% the generic fallback. Returns `undefined' when neither is set (or when
+%% both are set to the empty string).
+endpoint_url_from_env(ServiceEnvVar) ->
+    case os_env_bin(ServiceEnvVar) of
+        undefined -> os_env_bin(<<"AWS_ENDPOINT_URL">>);
+        Value     -> Value
+    end.
+
+os_env_bin(Name) when is_binary(Name) ->
+    case os:getenv(binary_to_list(Name)) of
+        false -> undefined;
+        ""    -> undefined;
+        Value -> list_to_binary(Value)
+    end.
+
+%% Apply an override URL. Parses via `uri_string' so we correctly handle
+%% trailing slashes, userinfo, embedded query strings, and explicit ports.
+%% Falls back to the defaults if the override is unparseable.
+%%
+%% Mirrors the AWS SDK Go v2 endpoint middleware
+%% (`service/<svc>/endpoints.go', `resolveEndpointV2Middleware'), which
+%% copies only Scheme + Host + Path + RawPath from the resolved endpoint,
+%% dropping query and fragment. We additionally drop `userinfo' so it
+%% never leaks into either the wire URL (no accidental HTTP Basic auth)
+%% or the SigV4 canonical request.
+rewrite_with_override(Override, OpPath, DefaultUrl, DefaultHost) ->
+    case uri_string:parse(to_binary(Override)) of
+        #{scheme := Scheme} = U0 ->
+            Authority = authority_from_uri(U0),
+            BasePath = to_binary(maps:get(path, U0, <<>>)),
+            Path = join_path(BasePath, to_binary(OpPath)),
+            Url = <<(to_binary(Scheme))/binary, "://",
+                    Authority/binary,
+                    Path/binary>>,
+            {Url, Authority};
+        _ ->
+            {DefaultUrl, DefaultHost}
+    end.
+
+%% Join base + operation path. Mirrors smithy-go's `JoinPath/2'
+%% (`transport/http/url.go'): the result always starts with `/', a single
+%% `/' separates the parts, and an empty operation path leaves the base
+%% path's trailing slash untouched.
+join_path(<<>>, B0) ->
+    ensure_leading_slash(B0);
+join_path(A0, B0) ->
+    A = ensure_leading_slash(A0),
+    B = strip_leading_slash(B0),
+    case {byte_size(B), binary:last(A)} of
+        {0, _}  -> A;
+        {_, $/} -> <<A/binary, B/binary>>;
+        {_, _}  -> <<A/binary, "/", B/binary>>
+    end.
+
+ensure_leading_slash(<<>>)                  -> <<"/">>;
+ensure_leading_slash(<<"/", _/binary>> = B) -> B;
+ensure_leading_slash(B)                     -> <<"/", B/binary>>.
+
+strip_leading_slash(<<"/", R/binary>>) -> R;
+strip_leading_slash(B)                 -> B.
+
+%% Build the `host[:port]' authority from a parsed URI map, preferring an
+%% explicit port when present.
+authority_from_uri(#{host := H, port := P}) when is_integer(P) ->
+    <<(to_binary(H))/binary, ":", (integer_to_binary(P))/binary>>;
+authority_from_uri(#{host := H}) ->
+    to_binary(H);
+authority_from_uri(_) ->
+    <<>>.
+
+to_binary(V) when is_binary(V) -> V;
+to_binary(V) when is_list(V)   -> list_to_binary(V).
 
 -spec encode_xml_key_value({binary(), any()}) -> iolist().
 encode_xml_key_value({K, V}) when is_binary(K), is_binary(V) ->
@@ -339,5 +441,164 @@ encode_xml_test() ->
 encode_query_sorted_test() ->
   Query = [{<<"two">>, <<"2">>}, {<<"one">>, <<"1">>}],
   ?assertEqual(<<"one=1&two=2">>, encode_query(Query)).
+
+%%--------------------------------------------------------------------
+%% apply_endpoint_url_override/4
+%%--------------------------------------------------------------------
+
+-define(ENV_SVC, "AWS_ENDPOINT_URL_DYNAMODB").
+-define(ENV_GEN, "AWS_ENDPOINT_URL").
+
+with_env(Vars, Fun) ->
+    Saved = [{K, os:getenv(K)} || {K, _} <- Vars],
+    try
+        lists:foreach(fun({K, false})    -> os:unsetenv(K);
+                         ({K, V})        -> os:putenv(K, V)
+                      end, Vars),
+        Fun()
+    after
+        lists:foreach(fun({K, false}) -> os:unsetenv(K);
+                         ({K, ""})    -> os:unsetenv(K);
+                         ({K, V})     -> os:putenv(K, V)
+                      end, Saved)
+    end.
+
+apply_endpoint_url_override_unset_test() ->
+    with_env([{?ENV_SVC, false}, {?ENV_GEN, false}], fun() ->
+        ?assertEqual(
+           {<<"https://dynamodb.us-east-1.amazonaws.com/">>,
+            <<"dynamodb.us-east-1.amazonaws.com">>},
+           apply_endpoint_url_override(
+             <<"https://dynamodb.us-east-1.amazonaws.com/">>,
+             <<"dynamodb.us-east-1.amazonaws.com">>,
+             <<"/">>,
+             <<"AWS_ENDPOINT_URL_DYNAMODB">>))
+    end).
+
+apply_endpoint_url_override_empty_is_unset_test() ->
+    with_env([{?ENV_SVC, ""}, {?ENV_GEN, ""}], fun() ->
+        ?assertEqual(
+           {<<"https://default/">>, <<"default">>},
+           apply_endpoint_url_override(<<"https://default/">>,
+                                       <<"default">>,
+                                       <<"/">>,
+                                       <<"AWS_ENDPOINT_URL_DYNAMODB">>))
+    end).
+
+apply_endpoint_url_override_service_specific_wins_test() ->
+    with_env([{?ENV_SVC, "http://svc.local:9000"},
+              {?ENV_GEN, "http://generic.local:1234"}], fun() ->
+        ?assertEqual(
+           {<<"http://svc.local:9000/">>, <<"svc.local:9000">>},
+           apply_endpoint_url_override(<<"https://default/">>,
+                                       <<"default">>,
+                                       <<"/">>,
+                                       <<"AWS_ENDPOINT_URL_DYNAMODB">>))
+    end).
+
+apply_endpoint_url_override_generic_fallback_test() ->
+    with_env([{?ENV_SVC, false},
+              {?ENV_GEN, "http://generic.local:1234"}], fun() ->
+        ?assertEqual(
+           {<<"http://generic.local:1234/">>, <<"generic.local:1234">>},
+           apply_endpoint_url_override(<<"https://default/">>,
+                                       <<"default">>,
+                                       <<"/">>,
+                                       <<"AWS_ENDPOINT_URL_DYNAMODB">>))
+    end).
+
+apply_endpoint_url_override_trailing_slash_test() ->
+    with_env([{?ENV_SVC, "http://localhost:8000/"}, {?ENV_GEN, false}],
+             fun() ->
+        ?assertEqual(
+           {<<"http://localhost:8000/">>, <<"localhost:8000">>},
+           apply_endpoint_url_override(<<"https://default/">>,
+                                       <<"default">>,
+                                       <<"/">>,
+                                       <<"AWS_ENDPOINT_URL_DYNAMODB">>))
+    end).
+
+apply_endpoint_url_override_preserves_op_path_test() ->
+    with_env([{?ENV_SVC, "http://proxy:8080/aws"}, {?ENV_GEN, false}],
+             fun() ->
+        ?assertEqual(
+           {<<"http://proxy:8080/aws/2015-03-31/functions">>,
+            <<"proxy:8080">>},
+           apply_endpoint_url_override(<<"https://default/">>,
+                                       <<"default">>,
+                                       <<"/2015-03-31/functions">>,
+                                       <<"AWS_ENDPOINT_URL_DYNAMODB">>))
+    end).
+
+apply_endpoint_url_override_drops_query_test() ->
+    %% Go v2 middleware only copies Scheme/Host/Path/RawPath, so any query
+    %% string on the override URL is dropped at request build time.
+    with_env([{?ENV_SVC, "http://proxy/?foo=bar"}, {?ENV_GEN, false}],
+             fun() ->
+        {Url, Host} = apply_endpoint_url_override(
+                        <<"https://default/">>, <<"default">>, <<"/">>,
+                        <<"AWS_ENDPOINT_URL_DYNAMODB">>),
+        ?assertEqual(<<"proxy">>, Host),
+        ?assertEqual(nomatch, binary:match(Url, <<"foo=bar">>))
+    end).
+
+apply_endpoint_url_override_drops_userinfo_test() ->
+    %% Userinfo MUST NOT leak into either the signed Host header or the
+    %% wire URL (hackney would otherwise turn it into HTTP Basic auth).
+    with_env([{?ENV_SVC, "http://user:pw@host:1234/"}, {?ENV_GEN, false}],
+             fun() ->
+        {Url, Host} = apply_endpoint_url_override(
+                        <<"https://default/">>, <<"default">>, <<"/">>,
+                        <<"AWS_ENDPOINT_URL_DYNAMODB">>),
+        ?assertEqual(<<"host:1234">>, Host),
+        ?assertEqual(<<"http://host:1234/">>, Url),
+        ?assertEqual(nomatch, binary:match(Url, <<"user">>))
+    end).
+
+apply_endpoint_url_override_base_path_no_op_path_test() ->
+    %% Matches smithy-go JoinPath("/foo", "/") -> "/foo" (b becomes empty
+    %% after stripping the leading slash, so no trailing slash is added).
+    with_env([{?ENV_SVC, "http://proxy/aws"}, {?ENV_GEN, false}], fun() ->
+        ?assertEqual(
+           {<<"http://proxy/aws">>, <<"proxy">>},
+           apply_endpoint_url_override(<<"https://default/">>,
+                                       <<"default">>,
+                                       <<"/">>,
+                                       <<"AWS_ENDPOINT_URL_DYNAMODB">>))
+    end).
+
+apply_endpoint_url_override_preserves_query_in_op_path_test() ->
+    %% Generated REST clients pass paths like "/bucket?list-type=2" or
+    %% "/bucket/key?acl" — the `?' must NOT be percent-encoded.
+    with_env([{"AWS_ENDPOINT_URL_S3", "http://localhost:9000"},
+              {?ENV_GEN, false}], fun() ->
+        ?assertEqual(
+           {<<"http://localhost:9000/bucket?list-type=2">>,
+            <<"localhost:9000">>},
+           apply_endpoint_url_override(
+             <<"https://amazonaws.com:443/bucket?list-type=2">>,
+             <<"amazonaws.com">>,
+             <<"/bucket?list-type=2">>,
+             <<"AWS_ENDPOINT_URL_S3">>)),
+        ?assertEqual(
+           {<<"http://localhost:9000/bucket/key?acl">>,
+            <<"localhost:9000">>},
+           apply_endpoint_url_override(
+             <<"https://amazonaws.com:443/bucket/key?acl">>,
+             <<"amazonaws.com">>,
+             <<"/bucket/key?acl">>,
+             <<"AWS_ENDPOINT_URL_S3">>))
+    end).
+
+apply_endpoint_url_override_replaces_scheme_test() ->
+    with_env([{?ENV_SVC, "http://localhost:8000"}, {?ENV_GEN, false}],
+             fun() ->
+        {Url, _} = apply_endpoint_url_override(
+                     <<"https://dynamodb.us-east-1.amazonaws.com/">>,
+                     <<"dynamodb.us-east-1.amazonaws.com">>,
+                     <<"/">>,
+                     <<"AWS_ENDPOINT_URL_DYNAMODB">>),
+        ?assertEqual(<<"http://localhost:8000/">>, Url)
+    end).
 
 -endif.
