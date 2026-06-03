@@ -27,14 +27,25 @@ sign_request(Client, Method, URL, Headers0, Body) ->
 sign_request(Client, Method, URL, Headers0, Body, Options) ->
     AccessKeyID = aws_client:access_key_id(Client),
     SecretAccessKey = aws_client:secret_access_key(Client),
-    Region = aws_client:region(Client),
+    Region = case aws_client:region(Client) of
+               <<"global">> ->
+                 [<<"*">>];
+               _ ->
+                 aws_client:region(Client)
+             end,
     Service = aws_client:service(Client),
     Token = aws_client:token(Client),
     Headers = case Token of
                 undefined -> Headers0;
                 _ -> [{<<"X-Amz-Security-Token">>, Token}|Headers0]
               end,
-    aws_signature:sign_v4(AccessKeyID, SecretAccessKey, Region, Service, calendar:universal_time(), Method, URL, Headers, Body, Options).
+    case proplists:get_value(sign_with_v4a, Options, false) of
+      true ->
+        {ok, SignedHeaders} = aws_signature:sign_v4a(AccessKeyID, SecretAccessKey, Token, Region, Service, Method, URL, Headers, Body, maps:from_list(Options)),
+        SignedHeaders;
+      false ->
+        aws_signature:sign_v4(AccessKeyID, SecretAccessKey, Region, Service, calendar:universal_time(), Method, URL, Headers, Body, Options)
+    end.
 
 %% @doc Include additions only if they don't already exist in the provided list.
 add_headers([], Headers) ->
